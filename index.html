@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en" data-style="tft">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Yezdi Adventure Rider Command cockpit with three dashboard styles and a read-only BLE connection.">
+<title>Yezdi Adventure Rider Command</title>
+<link rel="stylesheet" href="styles.css">
+<script src="telemetry.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<main class="shell">
+  <header class="top">
+    <h1 class="brand"><b>YEZDI</b><span>ADVENTURE</span><small>RIDER COMMAND</small></h1>
+    <div class="top-controls">
+      <span class="status" id="source" data-mode="demo" role="status">Demo mode</span>
+      <button id="connect" type="button">Bluetooth</button>
+    </div>
+  </header>
+  <div class="cockpit">
+    <section class="dial" aria-label="Speedometer">
+      <span class="compass north">N</span><span class="compass east">E</span><span class="compass south">S</span><span class="compass west">W</span>
+      <div class="ring"><div class="ticks"></div></div>
+      <div class="speed-read"><span class="label">Speed</span><strong data-value="speed">86</strong><span class="unit">km/h</span></div>
+    </section>
+    <section class="rpm panel" aria-label="Engine RPM">
+      <h2>Engine RPM</h2><div class="rpm-track" aria-hidden="true"><span></span></div>
+      <div class="reading"><b data-value="rpm">4,850</b><span>rpm</span></div>
+    </section>
+    <section class="gear panel" aria-label="Selected gear"><h2>Gear</h2><b data-value="gear">4</b></section>
+    <section class="vitals panel" aria-label="Bike status">
+      <div class="fuel"><h2>Fuel</h2><div class="fuel-dots" aria-hidden="true"></div><div class="reading"><b data-value="fuel">71</b><span>%</span></div></div>
+      <div class="battery"><h2>Battery</h2><div class="reading"><b data-value="battery">82</b><span>%</span></div><small data-value="voltage">12.7</small><small> V</small></div>
+      <div class="health"><h2>Malfunction</h2><b data-value="health">Normal</b></div>
+    </section>
+    <section class="odo panel"><h2>Odometer</h2><div class="reading"><b data-value="odo">12,486</b><span>km</span></div></section>
+    <section class="range panel"><h2>Est. range</h2><div class="reading"><b data-value="range">238</b><span>km</span></div></section>
+    <section class="trip trip-a panel"><h2>Trip A</h2><div class="reading"><b data-value="tripA">126.4</b><span>km</span></div><div class="trip-detail"><span>Mileage <b data-value="mileageA">29.5</b> km/L</span><span>Range <b data-value="range">238</b> km</span></div></section>
+    <section class="trip trip-b panel"><h2>Trip B</h2><div class="reading"><b data-value="tripB">348.2</b><span>km</span></div><div class="trip-detail"><span>Mileage <b data-value="mileageB">28.7</b> km/L</span><span>Range <b data-value="range">238</b> km</span></div></section>
+    <section class="route panel"><span class="arrow" aria-hidden="true">↱</span><div><h2>Navigation</h2><b id="direction">Keep right onto NH 44</b></div><div class="reading" id="turn"><b>2.4</b><span>km</span></div></section>
+  </div>
+  <p class="mode-note" id="note">Simulated ride · Values and directions are for preview.</p>
+</main>
+<nav class="switcher" aria-label="Dashboard style">
+  <div class="switcher-inner">
+    <button type="button" data-style="tft" aria-pressed="true"><span class="style-icon tft-icon" aria-hidden="true"></span>Blue TFT</button>
+    <button type="button" data-style="neon" aria-pressed="false"><span class="style-icon neon-icon" aria-hidden="true"></span>Neon Compass</button>
+    <button type="button" data-style="rally" aria-pressed="false"><span class="style-icon rally-icon" aria-hidden="true"></span>Rally Daylight</button>
+  </div>
+</nav>
+<div class="overlay" id="settings" hidden>
+  <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="connection-title">
+    <div class="dialog-head"><h2 id="connection-title">Ride data source</h2><button type="button" id="close" aria-label="Close">×</button></div>
+    <p id="support"></p>
+    <label for="profile">BLE profile</label>
+    <select id="profile"><option value="battery">Standard Battery Service · test device</option><option value="json">Custom read-only telemetry · JSON</option></select>
+    <div id="custom" hidden>
+      <label for="device-name">Exact advertised device name</label><input id="device-name" autocomplete="off" maxlength="80">
+      <label for="service">Service UUID</label><input id="service" autocomplete="off" spellcheck="false">
+      <label for="characteristic">Characteristic UUID</label><input id="characteristic" autocomplete="off" spellcheck="false">
+    </div>
+    <p class="help">Use the parked-bike checklist in the README. The Yezdi app connection alone does not establish a compatible telemetry profile.</p>
+    <div class="actions">
+      <button type="button" id="pair">Choose BLE device</button>
+      <button type="button" id="disconnect" disabled>Disconnect</button>
+      <button type="button" id="demo">Start demo</button>
+    </div>
+    <p id="connection-message" role="status"></p>
+  </section>
+</div>
+</body>
+</html>
