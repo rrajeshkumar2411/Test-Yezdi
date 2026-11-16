@@ -87,6 +87,7 @@ function tick() {
 
 function buttons() {
   discovery.disabled = !supported || session !== null || discovering;
+  testBike.disabled = discovery.disabled;
   pairButton.disabled = !supported || session !== null || discovering;
   disconnectButton.disabled = session === null && mode === "demo";
   profileSelect.disabled = session !== null;
@@ -260,6 +261,44 @@ discovery.addEventListener("click", async () => {
       ? "No device selected. Check that the bike is on and advertising while parked."
       : "Discovery failed. " + (error.message || error.name);
   } finally {
+    discovering = false;
+    buttons();
+  }
+});
+
+
+const bikeServices = ["8100", "8200", "8300", "8400", "8500", "8600", "9000"]
+  .map(suffix => "d6328aea-d630-4a83-b51b-1da8e8da" + suffix);
+const testBike = document.createElement("button");
+testBike.type = "button";
+testBike.textContent = "Test MY YEZDI connection";
+pairButton.parentNode.insertBefore(testBike, pairButton);
+testBike.addEventListener("click", async () => {
+  if (!supported || session || discovering) return;
+  discovering = true;
+  buttons();
+  let device;
+  let phase = "Device selection";
+  try {
+    message.textContent = "Select MY YEZDI in the Bluetooth picker.";
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: "MY YEZDI" }],
+      optionalServices: bikeServices
+    });
+    phase = "BLE connection";
+    message.textContent = "Opening the bike’s Bluetooth connection…";
+    const gatt = await device.gatt.connect();
+    phase = "Service discovery";
+    const services = await gatt.getPrimaryServices();
+    const visible = services.filter(service => bikeServices.includes(service.uuid.toLowerCase()));
+    message.textContent = "Connected to MY YEZDI. Browser can see " + visible.length + " of " +
+      bikeServices.length + " known bike services. " +
+      (visible.length ? "Service IDs end in " + visible.map(service => service.uuid.slice(-4)).join(", ") + ". " : "") +
+      "Test complete. Ride data is still unverified.";
+  } catch (error) {
+    message.textContent = phase + " failed (" + error.name + "): " + error.message;
+  } finally {
+    if (device?.gatt?.connected) device.gatt.disconnect();
     discovering = false;
     buttons();
   }
