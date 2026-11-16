@@ -86,12 +86,14 @@ function tick() {
   paint(data);
   if (active.bike) note.textContent = Object.keys(data).length
     ? "Live bike readings · Dashes indicate missing or expired data." : "Connected · Waiting for bike readings.";
+  if (active.bike && !settings.hidden) message.textContent = bikeStatus(active);
 }
 
 function buttons() {
   discovery.disabled = !supported || session !== null || discovering;
   testBike.disabled = discovery.disabled;
   connectBike.disabled = discovery.disabled;
+  notifyOnly.disabled = !!session || discovering;
   pairButton.disabled = !supported || session !== null || discovering;
   disconnectButton.disabled = session === null && mode === "demo";
   profileSelect.disabled = session !== null;
@@ -346,6 +348,11 @@ testBike.addEventListener("click", async () => {
 const connectBike = document.createElement("button");
 connectBike.type = "button";
 connectBike.textContent = "Connect bike";
+const notifyOnly = document.createElement("input");
+notifyOnly.type = "checkbox";
+const notifyLabel = document.createElement("label");
+notifyLabel.append(notifyOnly, " Bike compatibility test · notifications only");
+pairButton.parentNode.before(notifyLabel);
 pairButton.parentNode.insertBefore(connectBike, discovery);
 
 // The cluster returns eight channels in the same order used by the original console.
@@ -363,10 +370,30 @@ const bikeChannels = [
   null
 ];
 
-function receiveBikePacket(active, index, packet) {
-  if (active !== session || !packet) return;
+function bikeStatus(active) {
+  const stats = active.stats;
+  return "Packets: " + stats.reads + " read, " + stats.notifications + " notifications. " +
+    "Errors: " + stats.failedReads + " reads, " + stats.failedSubscriptions +
+    " subscriptions, " + stats.invalid + " invalid packets." +
+    (stats.lastError ? " Last error: " + stats.lastError : "");
+}
+
+function describeBleError(error) {
+  return error?.message || error?.name || String(error);
+}
+
+function receiveBikePacket(active, index, packet, source) {
+  if (active !== session) return;
+  if (packet instanceof ArrayBuffer || ArrayBuffer.isView(packet) && typeof packet.getUint8 !== "function") {
+    packet = ArrayBuffer.isView(packet)
+      ? new DataView(packet.buffer, packet.byteOffset, packet.byteLength) : new DataView(packet);
+  }
   const [minimum, decode] = bikeChannels[index];
-  if (packet.byteLength < minimum) return;
+  if (typeof packet?.getUint8 !== "function" || packet.byteLength < minimum) {
+    active.stats.invalid++;
+    return;
+  }
+  active.stats[source]++;
   const at = performance.now();
   for (const [key, value] of Object.entries(decode(packet))) {
     if (value === undefined) delete active.data[key];
@@ -376,7 +403,7 @@ function receiveBikePacket(active, index, packet) {
 }
 
 async function pollBike(active) {
-  if (active !== session || active.reading) return;
+  if (active !== session || active.reading || active.pendingRead || active.notifyOnly) return;
   active.reading = true;
   try {
     for (const reader of active.readers) {
@@ -385,11 +412,17 @@ async function pollBike(active) {
       const key = ["speed", "rpm"][reader.index];
       if (reader.subscribed && key && performance.now() - (active.data[key]?.at ?? -Infinity) < 2000) continue;
       try {
-        receiveBikePacket(active, reader.index, await withBikeTimeout(reader.channel.readValue()));
+        const pending = Promise.resolve(reader.channel.readValue());
+        active.pendingRead = pending;
+        void pending.then(() => { active.pendingRead = null; }, () => { active.pendingRead = null; });
+        receiveBikePacket(active, reader.index, await withBikeTimeout(pending), "reads");
         reader.next = 0;
-      } catch {
+      } catch (error) {
         if (active !== session) return;
+        active.stats.failedReads++;
+        active.stats.lastError = "Channel " + (reader.index + 1) + " read: " + describeBleError(error);
         reader.next = performance.now() + 20000;
+        if (active.pendingRead) return;
       }
     }
   } finally {
@@ -399,7 +432,8 @@ async function pollBike(active) {
 
 connectBike.addEventListener("click", async () => {
   if (!supported || session || discovering) return;
-  const active = {data:{}, notify:true, bike:true, listeners:[], readers:[]};
+  const active = {data:{}, notify:true, bike:true, listeners:[], readers:[],
+    notifyOnly:notifyOnly.checked, stats:{reads:0,notifications:0,failedReads:0,failedSubscriptions:0,invalid:0}};
   let phase = "Device selection";
   let connection;
   session = active;
@@ -415,7 +449,9 @@ connectBike.addEventListener("click", async () => {
       throw new Error("Select MY YEZDI in the picker.");
     }
     active.device = device;
-    active.disconnected = () => { if (active === session) finish("MY YEZDI disconnected."); };
+    active.disconnected = () => {
+      if (active === session) finish("MY YEZDI disconnected during " + phase.toLowerCase() + ". " + bikeStatus(active));
+    };
     device.addEventListener("gattserverdisconnected", active.disconnected);
     phase = "BLE connection";
     message.textContent = "Opening the bike’s Bluetooth connection…";
@@ -437,28 +473,31 @@ connectBike.addEventListener("click", async () => {
       if (!bikeChannels[index]) continue;
       let subscribed = false;
       if (channel.properties.notify || channel.properties.indicate) {
-        const listener = event => receiveBikePacket(active, index, event.target.value);
+        const listener = event => receiveBikePacket(active, index, event.target?.value ?? channel.value, "notifications");
         channel.addEventListener("characteristicvaluechanged", listener);
         active.listeners.push([channel, listener]);
         try {
           await withBikeTimeout(channel.startNotifications());
           subscribed = true;
           subscriptions++;
-        } catch {
+        } catch (error) {
+          active.stats.failedSubscriptions++;
+          active.stats.lastError = "Channel " + (index + 1) + " subscription: " + describeBleError(error);
           channel.removeEventListener("characteristicvaluechanged", listener);
         }
       }
       if (active !== session) return;
-      if (channel.properties.read) active.readers.push({channel,index,subscribed,next:0});
+      if (!active.notifyOnly && channel.properties.read) active.readers.push({channel,index,subscribed,next:0});
     }
     if (!active.readers.length && !subscriptions) throw new Error("No readable telemetry channels.");
+    phase = "live telemetry";
     setMode("live", "MY YEZDI connected", "Waiting for bike readings. Dashes indicate missing or expired data.");
     message.textContent = "MY YEZDI connected. Use Disconnect to end the session.";
     tick();
     closeSettings();
     void pollBike(active);
   } catch (error) {
-    if (active === session) finish(phase + " failed: " + (error?.message || String(error)));
+    if (active === session) finish(phase + " failed: " + describeBleError(error) + ". " + bikeStatus(active));
     if (connection) void connection.then(late => {
       if (!session && !discovering && late.connected) late.disconnect();
     }, () => {});
