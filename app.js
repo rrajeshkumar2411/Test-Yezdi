@@ -103,6 +103,7 @@ function clearSession() {
   const old = session;
   session = null;
   if (!old) return;
+  clearTimeout(old.reconnectTimer);
   for (const [channel, listener] of old.listeners ?? []) {
     channel.removeEventListener("characteristicvaluechanged", listener);
   }
@@ -283,13 +284,13 @@ testBike.type = "button";
 testBike.textContent = "Test MY YEZDI connection";
 pairButton.parentNode.insertBefore(testBike, pairButton);
 
-async function withBikeTimeout(operation) {
+async function withBikeTimeout(operation, milliseconds = 15000) {
   let timer;
   try {
     return await Promise.race([
       operation,
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("Timed out after 15 seconds.")), 15000);
+        timer = setTimeout(() => reject(new Error("Timed out after " + milliseconds / 1000 + " seconds.")), milliseconds);
       })
     ]);
   } finally {
@@ -367,7 +368,7 @@ const bikeChannels = [
   [6, p => ({tripA:distanceKm(p,0),tripB:distanceKm(p,3)})],
   [6, p => ({voltage:p.getUint8(5) ? p.getUint8(5) / 10 : undefined})],
   [3, p => ({range:p.getUint16(1) === 4095 ? undefined : p.getUint16(1)})],
-  null
+  [1, () => ({})] // Handlebar controls share this service; no dashboard action is bound.
 ];
 
 function bikeStatus(active) {
@@ -394,6 +395,7 @@ function receiveBikePacket(active, index, packet, source) {
     return;
   }
   active.stats[source]++;
+  if (source === "notifications") active.lastNotification[index] = performance.now();
   const at = performance.now();
   for (const [key, value] of Object.entries(decode(packet))) {
     if (value === undefined) delete active.data[key];
@@ -403,20 +405,23 @@ function receiveBikePacket(active, index, packet, source) {
 }
 
 async function pollBike(active) {
-  if (active !== session || active.reading || active.pendingRead || active.notifyOnly) return;
+  if (active !== session || active.reading || active.pendingRead || active.notifyOnly ||
+      performance.now() < active.nextPoll) return;
+  active.nextPoll = performance.now() + 4000;
   active.reading = true;
   try {
     for (const reader of active.readers) {
       if (active !== session) return;
       if (reader.next > performance.now()) continue;
-      const key = ["speed", "rpm"][reader.index];
-      if (reader.subscribed && key && performance.now() - (active.data[key]?.at ?? -Infinity) < 2000) continue;
+      const notificationAge = performance.now() - (active.lastNotification[reader.index] ?? -Infinity);
+      const freshness = reader.index < 2 ? 6000 : 20000;
+      if (notificationAge < freshness) continue;
       try {
         const pending = Promise.resolve(reader.channel.readValue());
         active.pendingRead = pending;
         void pending.then(() => { active.pendingRead = null; }, () => { active.pendingRead = null; });
         receiveBikePacket(active, reader.index, await withBikeTimeout(pending), "reads");
-        reader.next = 0;
+        reader.next = performance.now() + 4000;
       } catch (error) {
         if (active !== session) return;
         active.stats.failedReads++;
@@ -430,18 +435,21 @@ async function pollBike(active) {
   }
 }
 
-connectBike.addEventListener("click", async () => {
-  if (!supported || session || discovering) return;
-  const active = {data:{}, notify:true, bike:true, listeners:[], readers:[],
-    notifyOnly:notifyOnly.checked, stats:{reads:0,notifications:0,failedReads:0,failedSubscriptions:0,invalid:0}};
+function newBikeSession(notificationsOnly, reconnectAttempt = false) {
+  return {data:{}, notify:true, bike:true, listeners:[], readers:[], nextPoll:0,
+    lastNotification:{}, reconnectAttempt, notifyOnly:notificationsOnly,
+    stats:{reads:0,notifications:0,failedReads:0,failedSubscriptions:0,invalid:0}};
+}
+
+async function startBikeLink(active, knownDevice) {
   let phase = "Device selection";
   let connection;
   session = active;
-  setMode("idle", "Connecting", "Waiting for the bike.");
-  message.textContent = "Select MY YEZDI in the Bluetooth picker.";
+  setMode("idle", knownDevice ? "Reconnecting" : "Connecting", "Waiting for the bike.");
+  message.textContent = knownDevice ? "Retrying the existing Bluetooth device…" : "Select MY YEZDI in the Bluetooth picker.";
   buttons();
   try {
-    const device = await navigator.bluetooth.requestDevice({
+    const device = knownDevice ?? await navigator.bluetooth.requestDevice({
       acceptAllDevices:true, optionalServices:[yezdiTelemetryService]
     });
     if (active !== session) return;
@@ -450,17 +458,36 @@ connectBike.addEventListener("click", async () => {
     }
     active.device = device;
     active.disconnected = () => {
-      if (active === session) finish("MY YEZDI disconnected during " + phase.toLowerCase() + ". " + bikeStatus(active));
+      if (active !== session) return;
+      const elapsed = active.connectedAt === undefined ? ""
+        : " after " + Math.round((performance.now() - active.connectedAt) / 1000) + " seconds";
+      const reason = "MY YEZDI disconnected during " + phase.toLowerCase() + elapsed + ". " + bikeStatus(active);
+      if (phase !== "live telemetry" || active.reconnectAttempt || document.hidden) {
+        finish(reason);
+        return;
+      }
+      clearSession();
+      const retry = newBikeSession(active.notifyOnly, true);
+      retry.previousDrop = reason;
+      session = retry;
+      setMode("idle", "Reconnecting", "Bluetooth disconnected. Retrying once…");
+      message.textContent = reason + " Retrying once.";
+      buttons();
+      retry.reconnectTimer = setTimeout(() => {
+        if (retry === session && !document.hidden) void startBikeLink(retry, device);
+        else if (retry === session) finish(reason);
+      }, 2000);
     };
     device.addEventListener("gattserverdisconnected", active.disconnected);
     phase = "BLE connection";
     message.textContent = "Opening the bike’s Bluetooth connection…";
     connection = device.gatt.connect();
-    const gatt = await withBikeTimeout(connection);
+    const gatt = await withBikeTimeout(connection, knownDevice ? 15000 : 45000);
     if (active !== session) {
       if (session?.device !== device && gatt.connected) gatt.disconnect();
       return;
     }
+    active.connectedAt = performance.now();
     phase = "Telemetry channel discovery";
     const service = await withBikeTimeout(gatt.getPrimaryService(yezdiTelemetryService));
     if (active !== session) return;
@@ -471,15 +498,13 @@ connectBike.addEventListener("click", async () => {
     let subscriptions = 0;
     for (const [index, channel] of channels.entries()) {
       if (!bikeChannels[index]) continue;
-      let subscribed = false;
       if (channel.properties.notify || channel.properties.indicate) {
         const listener = event => receiveBikePacket(active, index, event.target?.value ?? channel.value, "notifications");
         channel.addEventListener("characteristicvaluechanged", listener);
         active.listeners.push([channel, listener]);
         try {
           await withBikeTimeout(channel.startNotifications());
-          subscribed = true;
-          subscriptions++;
+          if (index < 7) subscriptions++;
         } catch (error) {
           active.stats.failedSubscriptions++;
           active.stats.lastError = "Channel " + (index + 1) + " subscription: " + describeBleError(error);
@@ -487,7 +512,7 @@ connectBike.addEventListener("click", async () => {
         }
       }
       if (active !== session) return;
-      if (!active.notifyOnly && channel.properties.read) active.readers.push({channel,index,subscribed,next:0});
+      if (index < 7 && !active.notifyOnly && channel.properties.read) active.readers.push({channel,index,next:0});
     }
     if (!active.readers.length && !subscriptions) throw new Error("No readable telemetry channels.");
     phase = "live telemetry";
@@ -497,11 +522,17 @@ connectBike.addEventListener("click", async () => {
     closeSettings();
     void pollBike(active);
   } catch (error) {
-    if (active === session) finish(phase + " failed: " + describeBleError(error) + ". " + bikeStatus(active));
+    if (active === session) finish((active.previousDrop ? active.previousDrop + " Retry: " : "") +
+      phase + " failed: " + describeBleError(error) + ". " + bikeStatus(active));
     if (connection) void connection.then(late => {
       if (!session && !discovering && late.connected) late.disconnect();
     }, () => {});
   }
+}
+
+connectBike.addEventListener("click", () => {
+  if (!supported || session || discovering) return;
+  void startBikeLink(newBikeSession(notifyOnly.checked));
 });
 
 showDemo();
