@@ -86,7 +86,8 @@ function tick() {
 }
 
 function buttons() {
-  pairButton.disabled = !supported || session !== null;
+  discovery.disabled = !supported || session !== null || discovering;
+  pairButton.disabled = !supported || session !== null || discovering;
   disconnectButton.disabled = session === null && mode === "demo";
   profileSelect.disabled = session !== null;
 }
@@ -125,7 +126,7 @@ async function poll(active) {
 }
 
 async function connect() {
-  if (!supported || session) return;
+  if (!supported || session || discovering) return;
   let profile;
   try {
     profile = RiderTelemetry.profile(profileSelect.value, byId("device-name").value,
@@ -235,6 +236,35 @@ settings.addEventListener("keydown", event => {
 window.addEventListener("pagehide", () => {
   if (session) finish("BLE session ended when the page closed.");
 });
+
+const discovery = document.createElement("button");
+discovery.type = "button";
+discovery.textContent = "Find my bike";
+discovery.disabled = !supported;
+pairButton.parentNode.insertBefore(discovery, pairButton);
+const discoveryHelp = document.createElement("p");
+discoveryHelp.textContent = "Use Find my bike to see nearby BLE devices without a profile filter. Select your bike to check its advertised name.";
+pairButton.parentNode.before(discoveryHelp);
+let discovering = false;
+discovery.addEventListener("click", async () => {
+  if (!supported || session || discovering) return;
+  discovering = true;
+  buttons();
+  message.textContent = "Looking for nearby BLE devices…";
+  try {
+    const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true });
+    message.textContent = "Found: " + (device.name || "Unnamed BLE device") +
+      ". Discovery confirms visibility. A compatible profile is needed for telemetry.";
+  } catch (error) {
+    message.textContent = error.name === "NotFoundError"
+      ? "No device selected. Check that the bike is on and advertising while parked."
+      : "Discovery failed. " + (error.message || error.name);
+  } finally {
+    discovering = false;
+    buttons();
+  }
+});
+
 showDemo();
 buttons();
 setInterval(tick, 350);
