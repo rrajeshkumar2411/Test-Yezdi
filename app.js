@@ -267,38 +267,69 @@ discovery.addEventListener("click", async () => {
 });
 
 
-const bikeServices = ["8100", "8200", "8300", "8400", "8500", "8600", "9000"]
-  .map(suffix => "d6328aea-d630-4a83-b51b-1da8e8da" + suffix);
+
+const yezdiTelemetryService = "d6328aea-d630-4a83-b51b-1da8e8da8400";
 const testBike = document.createElement("button");
 testBike.type = "button";
 testBike.textContent = "Test MY YEZDI connection";
 pairButton.parentNode.insertBefore(testBike, pairButton);
+
+async function withBikeTimeout(operation) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Timed out after 15 seconds.")), 15000);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 testBike.addEventListener("click", async () => {
   if (!supported || session || discovering) return;
   discovering = true;
   buttons();
   let device;
+  let connection;
   let phase = "Device selection";
   try {
     message.textContent = "Select MY YEZDI in the Bluetooth picker.";
     device = await navigator.bluetooth.requestDevice({
-      filters: [{ name: "MY YEZDI" }],
-      optionalServices: bikeServices
+      acceptAllDevices: true,
+      optionalServices: [yezdiTelemetryService]
     });
+    if (device.name?.trim().toUpperCase() !== "MY YEZDI") {
+      throw new Error("Select MY YEZDI for this test.");
+    }
     phase = "BLE connection";
     message.textContent = "Opening the bike’s Bluetooth connection…";
-    const gatt = await device.gatt.connect();
-    phase = "Service discovery";
-    const services = await gatt.getPrimaryServices();
-    const visible = services.filter(service => bikeServices.includes(service.uuid.toLowerCase()));
-    message.textContent = "Connected to MY YEZDI. Browser can see " + visible.length + " of " +
-      bikeServices.length + " known bike services. " +
-      (visible.length ? "Service IDs end in " + visible.map(service => service.uuid.slice(-4)).join(", ") + ". " : "") +
-      "Test complete. Ride data is still unverified.";
+    connection = device.gatt.connect();
+    const gatt = await withBikeTimeout(connection);
+    phase = "Telemetry service discovery";
+    message.textContent = "Connected. Looking up the bike’s telemetry service…";
+    const service = await withBikeTimeout(gatt.getPrimaryService(yezdiTelemetryService));
+    phase = "Telemetry channel discovery";
+    const channels = await withBikeTimeout(service.getCharacteristics());
+    const readable = channels.filter(channel => channel.properties.read).length;
+    const notifying = channels.filter(channel =>
+      channel.properties.notify || channel.properties.indicate).length;
+    message.textContent = "Connected to MY YEZDI. Found " + channels.length +
+      " telemetry channels (" + readable + " readable, " + notifying +
+      " with notifications or indications). Test complete. Ride values are still unverified.";
   } catch (error) {
-    message.textContent = phase + " failed (" + error.name + "): " + error.message;
+    const detail = error?.message || String(error);
+    message.textContent = phase + " failed: " + detail;
   } finally {
-    if (device?.gatt?.connected) device.gatt.disconnect();
+    const gatt = device?.gatt;
+    if (gatt?.connected) gatt.disconnect();
+    else if (connection) {
+      void connection.then(late => {
+        if (!discovering && !session && late.connected) late.disconnect();
+      }, () => {});
+    }
     discovering = false;
     buttons();
   }
